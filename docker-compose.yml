@@ -1,0 +1,64 @@
+# InfluxDB 3 Core auf Synology DS918+ (Container Manager -> Projekt)
+#
+# Projektpfad z.B.: /volume1/docker/influxdb3
+# Vorher das Image importieren: Container Manager -> Image -> Importieren
+# (influxdb3-core-dsm.tar.gz, erzeugt mit build.sh)
+
+services:
+  influxdb3:
+    image: ${INFLUXDB3_IMAGE:-influxdb3-core-dsm:3.12.3}
+    container_name: influxdb3
+    # Startet als root, setzt die Besitzrechte der Synology-Ordner auf die
+    # Container-UID 1500 (sonst "Permission denied" beim Schreiben) und läuft
+    # danach per setpriv als influxdb3 (UID 1500) weiter. Ersetzt den früheren
+    # Helfer-Container "init-permissions", der beendet liegen blieb und das
+    # Projekt in DSM orange markierte.
+    # Rekursives chown nur, wenn der Ordner noch nicht UID 1500 gehört
+    # (spart Zeit bei vielen Parquet-Dateien).
+    user: "0:0"
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        for d in /var/lib/influxdb3 /plugins; do
+          [ "$$(stat -c %u "$$d")" = 1500 ] || chown -R 1500:1500 "$$d"
+        done
+        install -d -o 1500 -g 1500 /var/lib/influxdb3/data
+        install -d -o 1500 -g 1500 -m 700 /var/lib/influxdb3/secrets
+        export HOME=/home/influxdb3
+        exec setpriv --reuid=1500 --regid=1500 --init-groups /usr/bin/entrypoint.sh "$$@"
+      - influxdb3
+    restart: unless-stopped
+    ports:
+      - "${INFLUXDB3_PORT:-8181}:8181"
+    volumes:
+      - ./data:/var/lib/influxdb3
+      - ./plugins:/plugins
+    environment:
+      INFLUXDB3_NODE_ID: ${INFLUXDB3_NODE_ID:-ds918}
+      INFLUXDB3_OBJECT_STORE: file
+      INFLUXDB3_DATA_DIR: /var/lib/influxdb3/data
+      INFLUXDB3_ADMIN_TOKEN_FILE: /var/lib/influxdb3/secrets/admin-token.json
+      INFLUXDB3_DISABLE_AUTHZ: health,ping
+      INFLUXDB3_LOG_FILTER: ${INFLUXDB3_LOG_FILTER:-info}
+      # --- Ressourcen für den J3455 (4 Kerne, 4-8 GB RAM) ---
+      INFLUXDB3_NUM_DATAFUSION_THREADS: ${INFLUXDB3_NUM_DATAFUSION_THREADS:-3}
+      INFLUXDB3_EXEC_MEM_POOL_SIZE: ${INFLUXDB3_EXEC_MEM_POOL_SIZE:-20%}
+      INFLUXDB3_FORCE_SNAPSHOT_MEM_SIZE: ${INFLUXDB3_FORCE_SNAPSHOT_MEM_SIZE:-30%}
+      # Telemetrie an InfluxData abschalten
+      INFLUXDB3_DISABLE_TELEMETRY_UPLOAD: "true"
+    command: ["serve"]
+    # Speicherlimit, damit DSM selbst nicht ausgehungert wird
+    mem_limit: ${INFLUXDB3_MEM_LIMIT:-2g}
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
